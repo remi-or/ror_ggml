@@ -2897,6 +2897,7 @@ static void ggml_vec_dot_q4_2_q8_0(const int n, float * restrict s, const void *
 #endif
 }
 
+/// Main function to modify
 static void ggml_vec_dot_q4_3_q8_0(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
     const int nb = n / QK8_0;
 
@@ -2969,6 +2970,7 @@ static void ggml_vec_dot_q4_3_q8_0(const int n, float * restrict s, const void *
         const __m128 d1 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 1].d));
         const __m256 dx = _mm256_set_m128(d1, d0);
         /// dx contains [d1, d1, d1, d1, d0, d0, d0, d0] ie. 8 fp32
+        /// does it go faster with d1x*dy and d0x*dy and  then casting ? pbly not but let's see someday [TODO]
 
         summs += GGML_FP16_TO_FP32(x[2*i + 0].m) * y[i].s0
                + GGML_FP16_TO_FP32(x[2*i + 1].m) * y[i].s1;
@@ -3031,6 +3033,123 @@ static void ggml_vec_dot_q4_3_q8_0(const int n, float * restrict s, const void *
     }
     *s = sumf;
 #endif
+}
+
+
+// New function
+static inline __m256 mul_sqr_sum_int8_fp32(const __m256i x, const __m256i y) {
+    /*
+    Given two 32*int8 vectors x = [x0, ..., x31] and y = [y0, ..., y31] computes 
+    [sum_{i=0}^3(xi² * yi²), sum_{i=4}^7(xi² * yi²), ...] and returns it as a 8*fp32 vector.
+    */
+
+    // Get absolute values of x vectors
+    const __m256i ax = _mm256_sign_epi8(x, x);
+    // Sign the values of the y vectors
+    const __m256i sy = _mm256_sign_epi8(y, x);
+    
+    // V_plus = [x0y0 + x1y1, ....] (16*int16)
+    const __m256i V_plus = _mm256_maddubs_epi16(ax, sy);
+    // V_minus = [x0y0 - x1y1, ....] (16*int16)
+    const __m256i sign_mask =  _mm256_set1_epi16 ((short) 384);
+    const __m256i ssy =  _mm256_sign_epi8(sy, sign_mask);
+    const __m256i V_minus = _mm256_maddubs_epi16(ax, ssy);
+    // _mm256_dpwssds_epi32 with themselves , which squares their elements and adds them 2 by 2
+    __m256i acc = _mm256_setzero_si256();
+    acc = _mm256_dpwssds_epi32(V_plus, V_plus, acc);
+    acc = _mm256_dpwssds_epi32(V_minus, V_minus, acc);
+
+    // Right here, acc = 2*[(x0y0)² + (x1y1)² + (x2y2)² + (x3y3)², ....] (8*int32) so we divide it by 2
+    acc = _mm256_srai_epi32(acc, 1);
+    
+    // Return the converted vector [(x0y0)² + (x1y1)² + (x2y2)² + (x3y3)², ....] (8*fp32)
+    return _mm256_cvtepi32_ps(acc);
+}
+
+// New function
+static inline __m256 cross_term_int8_fp32(const __m256i x, const __m256i y) {
+    /*
+    Given two 32*int8 vectors x = [x0, ..., x31] and y = [y0, ..., y31] computes 
+    [sum_{i=0}^3(2*xi*yi²), sum_{i=4}^7(2*xi*yi²), ...] and returns it as a 8*fp32 vector.
+    Assumes xs is in the [0, 15] range.
+    */
+
+    // Convert the vectors from 32*int8 to 32*int16
+    const __m512i wide_x = _mm512_cvtepi8_epi16(x); 
+    const __m512i wide_y = _mm512_cvtepi8_epi16(y); 
+
+    // Multiply x by 2; Square y
+    const __m512i wide_2x = _mm512_slli_epi16(wide_x, 1);
+    const __m512i wide_y2 = _mm512_mullo_epi16(wide_y, wide_y); 
+
+    // Since (0 <= x <= 2^5) and (0 <= y² <= 2^14) then (0 <= xy² <= 2^19) we don't need saturation to int32
+    // TODO check that with REAL unit testing
+    __m512i wide_result = _mm512_setzero_epi32();
+    wide_result = _mm512_dpwssds_epi32(wide_2x, wide_y2, wide_result); 
+
+    // Here, wide_result = [2*x0*y0² + 2*x1*y1², ...] (16*int32)
+    const __m256i wide_result_low = _mm512_castsi512_si256(wide_result);
+    const __m256i wide_result_high = mm512_extracti32x8_epi32(wide_result, (int) 1);
+    const __m256i result = _mm256_hadd_epi32(wide_result_low, wide_result_high);
+    return _mm256_cvtepi32_ps(result);
+}
+
+// New function
+static void ggml_vec_dot_sqr_q4_3_q8_0(const int n, float * restrict s, const void * restrict vx, const void * restrict vy) {
+    const int nb = n / QK8_0;
+
+    assert(n % QK8_0 == 0);
+    assert(nb % 2 == 0);
+    assert(QK8_0 == 2*QK4_2);
+
+    const block_q4_3 * restrict x = vx;
+    const block_q8_0 * restrict y = vy;
+
+
+    // Initialize accumulator with zeros
+    __m256 acc = _mm256_setzero_ps(); /// accumulateur vectoriel
+    float summs = 0.0f;
+
+    // Main loop
+    for (int i = 0; i < nb; i++) {
+
+        // Compute dx = [dx1, dx1, dx1, dx1, dx0, dx0, dx0, dx0] (8*fp32)
+        const __m128 d0 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 0].d));
+        const __m128 d1 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 1].d));
+        const __m256 dx = _mm256_set_m128(d1, d0);
+
+        // Compute m = [m1, m1, m1, m1, m0, m0, m0, m0] (8*fp32)
+        const __m128 m0 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 0].m));
+        const __m128 m1 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 1].m));
+        const __m256 ms = _mm256_set_m128(m1, m0);
+
+        // Compute bx = [xQ_16, ..., xQ_31, xQ_0, ..., xQ_15] (32*int8)
+        const __m128i bx0 = bytes_from_nibbles_16(x[2*i + 0].qs); 
+        const __m128i bx1 = bytes_from_nibbles_16(x[2*i + 1].qs); 
+        const __m256i bx = _mm256_set_m128i(bx1, bx0);
+
+        // Load dy = [dy, ..., dy] (8*fp32)
+        const __m256 dy = _mm256_broadcast_ss(&y[i].d); 
+        // Load by = [yQ_0, ..., yQ_31] (32*int8)
+        const __m256i by = _mm256_loadu_si256((const __m256i *)y[i].qs);
+
+        // Compute delta = dx*dy and ms_dy = ms*dy
+        const __m256 delta = _mm256_mul_ps(dx, dy);
+        const __m256 ms_dy = _mm256_mul_ps(ms, dy);
+
+        // Accumulate 1st term
+        const __m256 first_term = mul_sqr_sum_int8_fp32(bx, by);
+        acc = _mm256_fmadd_ps(first_term, _mm256_mul_ps(delta, delta), acc);
+        // Accumulate 2nd term
+        const __m256 second_term = cross_term_int8_fp32(bx, by);
+        acc = _mm256_fmadd_ps(first_term, _mm256_mul_ps(delta, delta), acc);
+        // Accumulate 3rd term
+        const __m256 third_term = mul_sum_i8_pairs_float(by, by);
+        acc = _mm256_fmadd_ps(third_term, _mm256_mul_ps(ms_dy, ms_dy), acc);
+        
+    }
+
+    *s = hsum_float_8(acc) + summs;
 }
 
 
