@@ -2,7 +2,8 @@
 
 #include "test_functions.c"
 
-#define N_TEST 2048
+#define N_TEST 1000
+#define ITER_PER_TEST 1000
 #define MIN_FP32 -1000.0f
 #define MAX_FP32 +1000.0f
 
@@ -30,6 +31,24 @@ static inline __m256 mul_sum_i8_pairs_float(const __m256i x, const __m256i y) {
     const __m256i dot = _mm256_maddubs_epi16(ax, sy);
     return sum_i16_pairs_float(dot);
 #endif
+}
+
+static inline __m128i bytes_from_nibbles_16(const __int8_t * rsi)
+{
+    // Load 8 bytes from memory 
+    /// _mm_loadl_epi64 : Loads 64-bit integer from memory into first element of returned vector
+    __m128i tmp = _mm_loadl_epi64( ( const __m128i* )rsi );
+
+    // Expand bytes into uint16_t values
+    __m128i bytes = _mm_cvtepu8_epi16( tmp );
+
+    // Unpack values into individual bytes
+    const __m128i lowMask = _mm_set1_epi8( 0xF );
+    __m128i high = _mm_andnot_si128( lowMask, bytes );
+    __m128i low = _mm_and_si128( lowMask, bytes );
+    high = _mm_slli_epi16( high, 4 );
+    bytes = _mm_or_si128( low, high );
+    return bytes;
 }
 
 static inline __m256 mul_sqr_sum_int8_fp32(__m256i x, __m256i y) {
@@ -135,37 +154,26 @@ static inline __m256 vec_dot_sqr_body(float scalar_dx0, float scalar_dx1, float 
     return acc;
 }
 
-static inline __m256 vec_dot_sqr_body_scalar(float dx0, float dx1, float dy,
-                                             float m0, float m1,
-                                             __m256i bx, __m256i by)
+static inline __m256 vec_dot_body(float scalar_dx0, float scalar_dx1, const float* scalar_dy,
+                                      float scalar_m0, float scalar_m1,
+                                      __m256i bx, __m256i by)
 {
+    float summs = 0.0f;
     __m256 acc = _mm256_setzero_ps();
-    float* acc_ptr = (float*) &acc;
 
-    char* bx_ptr = (char*) &bx;
-    char* by_ptr = (char*) &by;
-    long x, y;
-    float local_acc, m, dx, delta;
+    const __m128 d0 = _mm_set1_ps(scalar_dx0);
+    const __m128 d1 = _mm_set1_ps(scalar_dx1);
+    const __m256 dx = _mm256_set_m128(d1, d0);
 
-    for (int i = 0; i < 8; i++) {
+    summs +=  (scalar_m0) * *scalar_dy
+            + (scalar_m1) * *scalar_dy;
 
-        local_acc = 0.0f;
-        m = (i < 4) ? m0 : m1;
-        dx = (i < 4) ? dx0 : dx1;
-        delta = dx * dy;
+    const __m256 dy = _mm256_broadcast_ss(scalar_dy); /// le fp32 delta_y broadcast 8 fois dans un vecteur de 8*32=256 bit
 
-        for (int j = 0; j < 4; j++) {
-            x = (long) *bx_ptr;
-            y = (long) *by_ptr;
-            local_acc += (delta*delta)  *  (float) (x*x*y*y);
-            local_acc += (2*delta*m*dy) *  (float) (x*y*y);
-            local_acc += (m*m*dy*dy)    *  (float) (y*y);
+    /// ca melange mais osef parce qu'on multiplie par le produit des deux deltas
+    const __m256 q = mul_sum_i8_pairs_float(bx, by); /// chaque float32 contient 4 produit de nibble sommés
+    /// ce qui donne au final 256/32 = 8 sommes de 4 produit de nibble
 
-            bx_ptr++;
-            by_ptr++;
-        }
-        acc_ptr[i] = local_acc;
-    }
     return acc;
 }
 
@@ -176,49 +184,12 @@ int main()
     float dx0, dx1, dy, m0, m1;
     __m256i bx = _mm256_setzero_si256();
     __m256i by = _mm256_setzero_si256();
-    __m256 result, ref;
+    int i, j;
 
-    // Binary tests
-    dx0 = 1;
-    dx1 = 1;
-    dy = 1;
-    m0 = 0;
-    m1 = 0;
-    bx = _mm256_set1_epi8(1);
-    by = _mm256_set1_epi8(1);
-    result = vec_dot_sqr_body(dx0, dx1, dy, m0, m1, bx, by);
-    ref = vec_dot_sqr_body_scalar(dx0, dx1, dy, m0, m1, bx, by);
-    if (1 - _mm256_equal_ps(&result, &ref)) {
-            printf("Binary test failed.\n");
-            printf("Scalar: ");
-            _mm256_print_fp32(&ref);
-            printf("Result: ");
-            _mm256_print_fp32(&result);
-            exit(1);
-    }
-
-    // Simple tests
-    dx0 = 2;
-    dx1 = 3;
-    dy = 5;
-    m0 = 1;
-    m1 = 2;
-    bx = _mm256_set1_epi8(1);
-    by = _mm256_set1_epi8(1);
-    result = vec_dot_sqr_body(dx0, dx1, dy, m0, m1, bx, by);
-    ref = vec_dot_sqr_body_scalar(dx0, dx1, dy, m0, m1, bx, by);
-    if (1 - _mm256_equal_ps(&result, &ref)) {
-            printf("Simple test failed.\n");
-            printf("Scalar: ");
-            _mm256_print_fp32(&ref);
-            printf("Result: ");
-            _mm256_print_fp32(&result);
-            exit(1);
-    }
-
-    // Unit tests
-    for (int i = 0; i < N_TEST; i++)
-    {
+    // Test loop
+    for (i = 0; i < N_TEST; i++)
+    {   
+        // Compute test variables
         dx0 = random_fp32(MIN_FP32, MAX_FP32);
         dx1 = random_fp32(MIN_FP32, MAX_FP32);
         dy = random_fp32(MIN_FP32, MAX_FP32);
@@ -227,23 +198,13 @@ int main()
         _mm256_randomize_epi8(&bx, 0, 16);
         _mm256_randomize_epi8(&by, -127, 128);
 
-        result = vec_dot_sqr_body(dx0, dx1, dy, m0, m1, bx, by);
-        ref = vec_dot_sqr_body_scalar(dx0, dx1, dy, m0, m1, bx, by);
-        if (1 - _mm256_close_ps(&result, &ref, 5e-4f))
-        {
-            printf("Unit test %d test failed.\n\nInputs:\n", i);
-            printf("dx0: %f\ndx1: %f\ndy: %f\nm0: %f\nm1: %f\nbx: ", dx0, dx1, dy, m0, m1);
-            _mm256i_print_int8(&bx);
-            printf("by: ");
-            _mm256i_print_int8(&by);
-            printf("\nScalar: ");
-            _mm256_print_fp32(&ref);
-            printf("Result: ");
-            _mm256_print_fp32(&result);
-            exit(1);
+        // Iter loop
+        for (j = 0; j < ITER_PER_TEST; j++) {
+            // vec_dot_sqr_body(dx0, dx1, dy, m0, m1, bx, by);
+            vec_dot_body(dx0, dx1, &dy, m0, m1, bx, by);
         }
     }
 
-    printf("All tests were passed.\n");
-    
+    printf("Run finished with %d iterations.\n", N_TEST * ITER_PER_TEST);
+    return 0;
 }

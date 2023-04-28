@@ -91,7 +91,9 @@ int _mm256_close_ps(__m256* x, __m256* y, float tol) {
     float error;
     for (int i = 0; i < 8; i++) {
         error = (*xi - *yi) / *yi;
-        if (fabsf(error) > tol) {
+        error = fabsf(error);
+        if (error > tol) {
+            printf("Failed closeness test with relative error: %f\n", error);
             return 0;
         }
         xi += 1;

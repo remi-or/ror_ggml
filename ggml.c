@@ -3153,7 +3153,7 @@ static void ggml_vec_dot_sqr_q4_3_q8_0(const int n, float * restrict s, const vo
         acc = _mm256_fmadd_ps(first_term, _mm256_mul_ps(delta, delta), acc);
         // Accumulate 2nd term
         const __m256 second_term = _mul3_sum_int8_fp32(bx, by);
-        acc = _mm256_fmadd_ps(first_term, _mm256_mul_ps(delta, delta), acc);
+        acc = _mm256_fmadd_ps(second_term, _mm256_mul_ps(delta, ms_dy), acc);
         // Accumulate 3rd term
         const __m256 third_term = mul_sum_i8_pairs_float(by, by);
         acc = _mm256_fmadd_ps(third_term, _mm256_mul_ps(ms_dy, ms_dy), acc);
