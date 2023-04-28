@@ -75,7 +75,7 @@ static inline __m256i _mm256_xy2_epi8_epi32(const __m128i x, const __m128i y) {
     // Since (0 <= x <= 2^5) and (0 <= y² <= 2^14) then (0 <= xy² <= 2^19) we don't need saturation to int32
     return _mm256_madd_epi16(wide_2x, wide_y2); 
 }
-
+ // TODO Scan from here
 static inline __m256 _mul3_sum_int8_fp32(const __m256i x, const __m256i y) {
     /*
     Given two 32*int8 vectors x = [x0, ..., x31] and y = [y0, ..., y31] computes 
