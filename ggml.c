@@ -2986,10 +2986,27 @@ static void ggml_vec_dot_q4_3_q8_0(const int n, float * restrict s, const void *
         const __m256i by = _mm256_loadu_si256((const __m256i *)y[i].qs); /// les 32 nibbles int8 de y : [int8_ny0, ... int8_ny31]
 
         /// ca melange mais osef parce qu'on multiplie par le produit des deux deltas
-        const __m256 q = mul_sum_i8_pairs_float(bx, by); /// chaque float32 contient 4 produit de nibble sommés
+        // const __m256 q = mul_sum_i8_pairs_float(bx, by); /// chaque float32 contient 4 produit de nibble sommés
         /// ce qui donne au final 256/32 = 8 sommes de 4 produit de nibble
+        // acc = _mm256_fmadd_ps(q, _mm256_mul_ps(dx, dy), acc);
 
-        acc = _mm256_fmadd_ps(q, _mm256_mul_ps(dx, dy), acc);
+        /// SUB
+        const __m256 delta = _mm256_mul_ps(dx, dy);
+
+        const __m128 m0 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 0].m));
+        const __m128 m1 = _mm_set1_ps(GGML_FP16_TO_FP32(x[2*i + 1].m));
+        const __m256 ms = _mm256_set_m128(m1, m0);
+        const __m256 ms_dy = _mm256_mul_ps(ms, dy);
+
+        // Accumulate 1st term
+        const __m256 first_term = mul_sqr_sum_int8_fp32(bx, by);
+        acc = _mm256_fmadd_ps(first_term, _mm256_mul_ps(delta, delta), acc);
+        // Accumulate 2nd term
+        const __m256 second_term = _mul3_sum_int8_fp32(bx, by);
+        acc = _mm256_fmadd_ps(second_term, _mm256_mul_ps(delta, ms_dy), acc);
+        // Accumulate 3rd term
+        const __m256 third_term = mul_sum_i8_pairs_float(by, by);
+        acc = _mm256_fmadd_ps(third_term, _mm256_mul_ps(ms_dy, ms_dy), acc);
     }
 
     *s = hsum_float_8(acc) + summs;

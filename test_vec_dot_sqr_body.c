@@ -245,5 +245,22 @@ int main()
     }
 
     printf("All tests were passed.\n");
-    
+
+    dx0 = 2.5f;
+    dx1 = -3.0f;
+    dy = 4.0f;
+    m0 = 1.5f;
+    m1 = -3.0f;
+    _mm256_randomize_epi8(&bx, 0, 16);
+    _mm256_randomize_epi8(&by, -127, 128);
+    result = vec_dot_sqr_body(dx0, dx1, dy, m0, m1, bx, by);
+    ref = vec_dot_sqr_body_scalar(dx0, dx1, dy, m0, m1, bx, by);
+    printf("dx0: %f\ndx1: %f\ndy: %f\nm0: %f\nm1: %f\nbx: ", dx0, dx1, dy, m0, m1);
+    _mm256i_print_int8(&bx);
+    printf("by: ");
+    _mm256i_print_int8(&by);
+    printf("\nScalar: ");
+    _mm256_print_fp32(&ref);
+    printf("Result: ");
+    _mm256_print_fp32(&result);
 }
